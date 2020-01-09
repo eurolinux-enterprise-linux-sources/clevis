@@ -1,0 +1,61 @@
+From bcb46fe1e40b390cb39353b75806bf3e05177ef0 Mon Sep 17 00:00:00 2001
+From: Nathaniel McCallum <npmccallum@redhat.com>
+Date: Mon, 13 Nov 2017 11:28:14 -0500
+Subject: [PATCH] Fix dracut unlocker
+
+We weren't generating the path to clevis-luks-askpass correctly in the
+dracut module.
+
+Fixes: #23
+---
+ src/dracut/Makefile.am                             | 10 ++++------
+ src/dracut/clevis-hook.sh.in                       |  2 +-
+ src/dracut/{module-setup.sh => module-setup.sh.in} |  2 +-
+ 3 files changed, 6 insertions(+), 8 deletions(-)
+ rename src/dracut/{module-setup.sh => module-setup.sh.in} (96%)
+
+diff --git a/src/dracut/Makefile.am b/src/dracut/Makefile.am
+index 5a3a0f4..e26b61f 100644
+--- a/src/dracut/Makefile.am
++++ b/src/dracut/Makefile.am
+@@ -1,12 +1,10 @@
+ dracutdir = @dracutmodulesdir@/60$(PACKAGE_NAME)
+-nodist_dracut_SCRIPTS = clevis-hook.sh
+-dist_dracut_SCRIPTS = module-setup.sh
+-
+-CLEANFILES=clevis-hook.sh
+-EXTRA_DIST=clevis-hook.sh.in
++nodist_dracut_SCRIPTS = clevis-hook.sh module-setup.sh
++EXTRA_DIST=clevis-hook.sh.in module-setup.sh.in
++CLEANFILES=clevis-hook.sh module-setup.sh
+ 
+ %: %.in
+ 	$(AM_V_GEN)mkdir -p $(dir $@)
+ 	$(AM_V_GEN)$(SED) \
+-		-e 's,@libexedir\@,$(libexecdir),g' \
++		-e 's,@libexecdir\@,$(libexecdir),g' \
+ 		$(srcdir)/$@.in > $@
+diff --git a/src/dracut/clevis-hook.sh.in b/src/dracut/clevis-hook.sh.in
+index 5d0c814..cb257c9 100755
+--- a/src/dracut/clevis-hook.sh.in
++++ b/src/dracut/clevis-hook.sh.in
+@@ -1,2 +1,2 @@
+ #!/bin/bash
+-@libexec@/clevis-luks-askpass
++@libexecdir@/clevis-luks-askpass
+diff --git a/src/dracut/module-setup.sh b/src/dracut/module-setup.sh.in
+similarity index 96%
+rename from src/dracut/module-setup.sh
+rename to src/dracut/module-setup.sh.in
+index 92fe08e..5087d56 100755
+--- a/src/dracut/module-setup.sh
++++ b/src/dracut/module-setup.sh.in
+@@ -37,7 +37,7 @@ install() {
+         clevis-decrypt-http \
+         clevis-decrypt-tang \
+         clevis-decrypt-sss \
+-        clevis-luks-askpass \
++        @libexecdir@/clevis-luks-askpass \
+         clevis-decrypt \
+         luksmeta \
+         clevis \

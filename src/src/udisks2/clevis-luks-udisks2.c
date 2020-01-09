@@ -31,10 +31,14 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <libaudit.h>
+#include <getopt.h>
 #include <pwd.h>
 #include <grp.h>
 
 #define MAX_UDP 65507
+#define UERR ((uid_t) -1)
+#define GERR ((gid_t) -1)
 
 typedef struct {
     ssize_t used;
@@ -51,6 +55,11 @@ struct context {
     GMainLoop *loop;
     GList *lst;
     int sock;
+};
+
+static const luksmeta_uuid_t CLEVIS_LUKS_UUID = {
+    0xcb, 0x6e, 0x89, 0x04, 0x81, 0xff, 0x40, 0xda,
+    0xa8, 0x4a, 0x07, 0xab, 0x9a, 0xb5, 0x71, 0x5e
 };
 
 static void
@@ -101,40 +110,33 @@ idle(gpointer misc)
         if (!dev)
             continue;
 
-        for (int slot = 0; slot < crypt_keyslot_max(CRYPT_LUKS1); slot++) {
-            gboolean success = FALSE;
+        pkt.used = strlen(dev) + 1;
+        if ((size_t) pkt.used > sizeof(pkt.data))
+            continue;
 
-            pkt.used = strlen(dev) + 2;
-            if ((size_t) pkt.used > sizeof(pkt.data))
-                continue;
+        strcpy(pkt.data, dev);
 
-            pkt.data[0] = slot;
-            strcpy(&pkt.data[1], dev);
-
-            if (send(ctx->sock, pkt.data, pkt.used, 0) != pkt.used) {
-                g_main_loop_quit(ctx->loop);
-                break;
-            }
-
-            memset(&pkt, 0, sizeof(pkt));
-
-            pkt.used = recv(ctx->sock, pkt.data, sizeof(pkt.data), 0);
-            if (pkt.used == 0)
-                continue;
-            else if (pkt.used < 0 || (size_t) pkt.used >= sizeof(pkt.data)) {
-                g_main_loop_quit(ctx->loop);
-                break;
-            }
-
-            /* NOTE: pkt.data is now implicitly NULL terminated regardless of
-             * whether or not the plaintext inside the JWE was terminated. */
-
-            success = udisks_encrypted_call_unlock_sync(enc, pkt.data, options,
-                                                        NULL, NULL, NULL);
-            memset(&pkt, 0, sizeof(pkt));
-            if (success)
-                break;
+        if (send(ctx->sock, pkt.data, pkt.used, 0) != pkt.used) {
+            g_main_loop_quit(ctx->loop);
+            break;
         }
+
+        memset(&pkt, 0, sizeof(pkt));
+
+        pkt.used = recv(ctx->sock, pkt.data, sizeof(pkt.data), 0);
+        if (pkt.used == 0)
+            continue;
+        else if (pkt.used < 0 || (size_t) pkt.used >= sizeof(pkt.data)) {
+            g_main_loop_quit(ctx->loop);
+            break;
+        }
+
+        /* NOTE: pkt.data is now implicitly NULL terminated regardless of
+         * whether or not the plaintext inside the JWE was terminated. */
+
+        udisks_encrypted_call_unlock_sync(enc, pkt.data, options,
+                                          NULL, NULL, NULL);
+        memset(&pkt, 0, sizeof(pkt));
     }
 
 error:
@@ -288,49 +290,6 @@ on_signal(int sig)
 }
 
 static ssize_t
-load_jwe(const pkt_t *req, uint8_t *out, size_t max)
-{
-    static const luksmeta_uuid_t CLEVIS_LUKS_UUID = {
-        0xcb, 0x6e, 0x89, 0x04, 0x81, 0xff, 0x40, 0xda,
-        0xa8, 0x4a, 0x07, 0xab, 0x9a, 0xb5, 0x71, 0x5e
-    };
-
-    struct crypt_device *cd = NULL;
-    luksmeta_uuid_t uuid = {};
-    ssize_t r = 0;
-
-    r = crypt_init(&cd, &req->data[1]);
-    if (r < 0)
-        goto egress;
-
-    r = crypt_load(cd, CRYPT_LUKS1, NULL);
-    if (r < 0)
-        goto egress;
-
-    switch (crypt_keyslot_status(cd, req->data[0])) {
-    case CRYPT_SLOT_ACTIVE:
-    case CRYPT_SLOT_ACTIVE_LAST:
-        break;
-    default:
-        r = -EBADSLT;
-        goto egress;
-    }
-
-    r = luksmeta_load(cd, req->data[0], uuid, out, max);
-    if (r < 0)
-        goto egress;
-
-    if (memcmp(uuid, CLEVIS_LUKS_UUID, sizeof(uuid)) == 0)
-        return r;
-
-    r = -EBADSLT;
-
-egress:
-    crypt_free(cd);
-    return r;
-}
-
-static ssize_t
 recover_key(const pkt_t *jwe, char *out, size_t max, uid_t uid, gid_t gid)
 {
     int push[2] = { -1, -1 };
@@ -352,10 +311,10 @@ recover_key(const pkt_t *jwe, char *out, size_t max, uid_t uid, gid_t gid)
         char *const env[] = { "PATH=" BINDIR, NULL };
         int r = 0;
 
-        if (gid != 0 && (setgid(gid) != 0 || setegid(gid) != 0))
+        if (setgid(gid) != 0 || setegid(gid) != 0)
             return EXIT_FAILURE;
 
-        if (uid != 0 && (setuid(uid) != 0 || seteuid(uid) != 0))
+        if (setuid(uid) != 0 || seteuid(uid) != 0)
             return EXIT_FAILURE;
 
         r = dup2(push[PIPE_RD], STDIN_FILENO);
@@ -406,26 +365,114 @@ error:
     return -errno;
 }
 
+static bool
+log_attempt(int log, struct crypt_device *cd, bool success)
+{
+    const char *uuid = NULL;
+    char msg[4096] = {};
+    char *dev = NULL;
+    int r = 0;
+
+    uuid = crypt_get_uuid(cd);
+    if (!uuid)
+        return false;
+
+    dev = audit_encode_nv_string("device", crypt_get_device_name(cd), 0);
+    if (!dev)
+        return false;
+
+    r = snprintf(msg, sizeof(msg),
+                 "op=recovered-key-for uuid=%s %s",
+                 uuid, dev);
+    free(dev);
+    if (r < 0 || r == sizeof(msg))
+        return false;
+
+    return audit_log_user_message(log, AUDIT_USER_DEVICE, msg,
+                                  NULL, NULL, NULL, success) > 0;
+}
+
+static const char *sopts = "hu:g:";
+static const struct option lopts[] = {
+    { "help",   no_argument,       .val = 'h' },
+    { "user",   required_argument, .val = 'u' },
+    { "group",  required_argument, .val = 'g' },
+    {}
+};
+
+static uid_t
+usr2uid(const char *usr) {
+    const struct passwd *tmp = getpwnam(usr);
+    return tmp ? tmp->pw_uid : UERR;
+}
+
+static gid_t
+grp2gid(const char *grp) {
+    const struct group *tmp = getgrnam(grp);
+    return tmp ? tmp->gr_gid : GERR;
+}
+
 int
 main(int argc, char *const argv[])
 {
-    const struct passwd *pwd = getpwnam(CLEVIS_USER);
-    const struct group *grp = getgrnam(CLEVIS_GROUP);
-    uid_t uid = pwd ? pwd->pw_uid : 0;
-    gid_t gid = grp ? grp->gr_gid : 0;
+    const int slotlen = crypt_keyslot_max(CRYPT_LUKS1);
+    gid_t recg = grp2gid(CLEVIS_GROUP); /* Recovery group */
+    uid_t recu = usr2uid(CLEVIS_USER);  /* Recovery user */
+    gid_t unlg = getgid();              /* Unlock group */
+    uid_t unlu = getuid();              /* Unlock user */
+    int log = -1;
 
-    if (!pwd) {
+    if (recu == UERR) {
         fprintf(stderr, "Invalid user name '%s'!\n", CLEVIS_USER);
         return EXIT_FAILURE;
     }
 
-    if (!grp) {
+    if (recg == GERR) {
         fprintf(stderr, "Invalid group name '%s'!\n", CLEVIS_GROUP);
         return EXIT_FAILURE;
     }
 
-    if (getuid() == geteuid()) {
-        fprintf(stderr, "Not running as SUID = root!\n");
+    if (geteuid() != 0) {
+        fprintf(stderr, "Root privileges required!\n");
+        return EXIT_FAILURE;
+    }
+
+    for (int c; (c = getopt_long(argc, argv, sopts, lopts, NULL)) >= 0; ) {
+        switch (c) {
+        case 'u':
+            if (getuid() != 0) {
+                fprintf(stderr, "You can only specify the user as root!\n");
+                return EXIT_FAILURE;
+            }
+
+            unlu = usr2uid(optarg);
+            if (unlu == 0 || unlu == UERR) {
+                fprintf(stderr, "Invalid user name '%s'!\n", optarg);
+                return EXIT_FAILURE;
+            }
+            break;
+
+        case 'g':
+            if (getuid() != 0) {
+                fprintf(stderr, "You can only specify the group as root!\n");
+                return EXIT_FAILURE;
+            }
+
+            unlg = grp2gid(optarg);
+            if (unlg == 0 || unlg == GERR) {
+                fprintf(stderr, "Invalid group name '%s'!\n", optarg);
+                return EXIT_FAILURE;
+            }
+            break;
+
+        default:
+            fprintf(stderr, "Usage: clevis-luks-udisks2 [-u USER -g GROUP]\n");
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (unlu == 0 || unlg == 0) {
+        fprintf(stderr, "Either run as SETUID=root or use -u/-g!\n");
         return EXIT_FAILURE;
     }
 
@@ -444,7 +491,8 @@ main(int argc, char *const argv[])
 
         safeclose(&pair[0]);
 
-        if (seteuid(getuid()) == 0)
+        if (setgid(unlg) == 0 && setegid(unlg) == 0 &&
+            setuid(unlu) == 0 && seteuid(unlu) == 0)
             status = child_main(pair[1]);
 
         safeclose(&pair[1]);
@@ -461,30 +509,67 @@ main(int argc, char *const argv[])
     signal(SIGUSR2, on_signal);
     signal(SIGCHLD, on_signal);
 
-    if (setuid(geteuid()) == -1)
+    if (setgid(0) == -1 || setegid(0) == -1 ||
+        setuid(0) == -1 || seteuid(0) == -1)
+        goto error;
+
+    log = audit_open();
+    if (log < 0)
         goto error;
 
     for (pkt_t req = {}, jwe = {}, key = {}; ; key = (pkt_t) {}) {
+        struct crypt_device *cd = NULL;
+        luksmeta_uuid_t uuid = {};
+        int r = 0;
+
         /* Receive a request. Ensure that it is null terminated. */
         req.used = recv(pair[0], req.data, sizeof(req.data), 0);
-        if (req.used < 2 || req.data[req.used - 1])
+        if (req.used < 1 || req.data[req.used - 1])
             break;
 
-        fprintf(stderr, "%s\tSLOT\t%hhu\n", &req.data[1], req.data[0]);
+        r = crypt_init(&cd, req.data);
+        if (r < 0)
+            goto next;
 
-        /* Load the JWE for the request. */
-        jwe.used = load_jwe(&req, (uint8_t *) jwe.data, sizeof(jwe.data));
-        fprintf(stderr, "%s\tMETA\t%s\n", &req.data[1],
-                strerror(jwe.used < 0 ? -jwe.used : 0));
+        r = crypt_load(cd, CRYPT_LUKS1, NULL);
+        if (r < 0)
+            goto next;
 
-        /* Recover the key from the JWE. */
-        if (jwe.used > 0) {
-            key.used = recover_key(&jwe, key.data, sizeof(key.data), uid, gid);
-            fprintf(stderr, "%s\tRCVR\t%s (%zd)\n", &req.data[1],
+        for (uint8_t s = 0; s < slotlen && key.used <= 0; s++) {
+            fprintf(stderr, "%s\tSLOT\t%hhu\n", req.data, s);
+            switch (crypt_keyslot_status(cd, s)) {
+            case CRYPT_SLOT_ACTIVE:
+            case CRYPT_SLOT_ACTIVE_LAST:
+                break;
+            default:
+                continue;
+            }
+
+            jwe.used = luksmeta_load(cd, s, uuid, jwe.data, sizeof(jwe.data));
+            if (jwe.used <= 0)
+                continue;
+
+            if (memcmp(uuid, CLEVIS_LUKS_UUID, sizeof(uuid)) != 0)
+                continue;
+
+            fprintf(stderr, "%s\tMETA\t%s\n", req.data,
+                    strerror(jwe.used < 0 ? -jwe.used : 0));
+
+            /* Recover the key from the JWE. */
+            key.used = recover_key(&jwe, key.data, sizeof(key.data), recu, recg);
+            fprintf(stderr, "%s\tRCVR\t%s (%zd)\n", req.data,
                     strerror(key.used < 0 ? -key.used : 0), key.used);
-            if (key.used < 0)
-                key.used = 0;
         }
+
+        if (key.used < 0)
+            key.used = 0;
+
+        /* Don't return the key unless auditing succeeds. */
+        if (!log_attempt(log, cd, key.used > 0))
+            memset(&key, 0, sizeof(key));
+
+next:
+        crypt_free(cd);
 
         /* Send the key as a reply. */
         if (send(pair[0], key.data, key.used, 0) != key.used)
@@ -492,6 +577,7 @@ main(int argc, char *const argv[])
     }
 
 error:
+    safeclose(&log);
     safeclose(&pair[0]);
     if (pid != -1) {
         kill(pid, SIGTERM);

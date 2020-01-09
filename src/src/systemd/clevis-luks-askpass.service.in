@@ -1,0 +1,8 @@
+[Unit]
+Description=Clevis LUKS systemd-ask-password Responder
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@libexecdir@/clevis-luks-askpass
