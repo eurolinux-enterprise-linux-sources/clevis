@@ -1,0 +1,44 @@
+From 7d19c76bfc9a7b569a1077d1e5673a28bf31606f Mon Sep 17 00:00:00 2001
+From: Javier Martinez Canillas <javierm@redhat.com>
+Date: Tue, 6 Mar 2018 13:59:34 +0100
+Subject: [PATCH] Don't execute clevis-luks-unlock while loop in a subshell
+
+The loop that tries to open the dm-crypt devices using the pins in the
+luksmeta header is executed in a subshell. So on success it calls exit
+to exit the subshell.
+
+But then clevis-luks-unlock has no way to know if the encrypted device
+was opened correctly or not. So run the loop in the main shell process
+and return 0 as exit status if the operation was successful.
+
+Fixes: #36
+
+Signed-off-by: Javier Martinez Canillas <javierm@redhat.com>
+---
+ src/clevis-luks-unlock | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/clevis-luks-unlock b/src/clevis-luks-unlock
+index 6396680..7d316cd 100755
+--- a/src/clevis-luks-unlock
++++ b/src/clevis-luks-unlock
+@@ -54,7 +54,7 @@ fi
+ 
+ NAME=${NAME:-luks-`cryptsetup luksUUID $DEV`}
+ 
+-luksmeta show -d "$DEV" | while read -r slot state uuid; do
++while read -r slot state uuid; do
+     [ "$state" != "active" ] && continue
+     [ "$uuid" != "$UUID" ] && continue
+ 
+@@ -62,6 +62,6 @@ luksmeta show -d "$DEV" | while read -r slot state uuid; do
+         echo -n "$pt" | cryptsetup open -d- "$DEV" "$NAME"
+         exit 0
+     fi
+-done
++done <<< "$(luksmeta show -d "$DEV")"
+ 
+ exit 1
+-- 
+2.17.1
+

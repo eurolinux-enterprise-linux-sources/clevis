@@ -2,7 +2,7 @@
 
 Name:           clevis
 Version:        7
-Release:        4%{?dist}
+Release:        8%{?dist}
 Summary:        Automated decryption framework
 
 License:        GPLv3+
@@ -10,6 +10,9 @@ URL:            https://github.com/latchset/%{name}
 Source0:        https://github.com/latchset/%{name}/releases/download/v%{version}/%{name}-%{version}.tar.bz2
 Patch0:         clevis-7-dracut.patch
 Patch1:         clevis-7-retry.patch
+Patch2:         clevis-7-nospam.patch
+Patch3:         clevis-7-tpm2.patch
+Patch4:         clevis-7-subshell.patch
 
 BuildRequires:  libjose-devel >= 8
 BuildRequires:  libluksmeta-devel >= 8
@@ -17,6 +20,9 @@ BuildRequires:  audit-libs-devel >= 2.8.1
 BuildRequires:  libudisks2-devel
 BuildRequires:  openssl-devel
 
+%ifarch i686 x86_64
+BuildRequires:  tpm2-tools >= 3.0.0
+%endif
 BuildRequires:  desktop-file-utils
 BuildRequires:  pkgconfig
 BuildRequires:  autoconf
@@ -26,6 +32,9 @@ BuildRequires:  dracut
 BuildRequires:  tang >= 6
 BuildRequires:  curl
 
+%ifarch i686 x86_64
+Requires:       tpm2-tools >= 3.0.0
+%endif
 Requires:       coreutils
 Requires:       jose >= 8
 Requires:       curl
@@ -118,6 +127,12 @@ exit 0
 %{_mandir}/man1/%{name}-decrypt.1*
 %{_mandir}/man1/%{name}.1*
 
+%ifarch i686 x86_64
+%{_bindir}/%{name}-decrypt-tpm2
+%{_bindir}/%{name}-encrypt-tpm2
+%{_mandir}/man1/%{name}-encrypt-tpm2.1*
+%endif
+
 %files luks
 %{_mandir}/man1/%{name}-luks-unlockers.1*
 %{_mandir}/man1/%{name}-luks-unlock.1*
@@ -140,6 +155,22 @@ exit 0
 %attr(4755, root, root) %{_libexecdir}/%{name}-luks-udisks2
 
 %changelog
+* Mon Jul 30 2018 Nathaniel McCallum <npmccallum@redhat.com> - 7-8
+- Fix quoting on older bash shells (from previous patch)
+- Resolves: rhbz#1599728
+
+* Tue Jul 24 2018 Nathaniel McCallum <npmccallum@redhat.com> - 7-7
+- Backport subshell fix for clevis-luks-unlock
+- Resolves: rhbz#1599728
+
+* Mon Jul 09 2018 Nathaniel McCallum <npmccallum@redhat.com> - 7-6
+- Backport TPM 2.0 support
+- Resolves: rhbz#1472435
+
+* Mon Jul 09 2018 Nathaniel McCallum <npmccallum@redhat.com> - 7-5
+- Don't spam the log for uninitialized devices.
+- Resolves: rhbz#1538759
+
 * Mon Nov 13 2017 Nathaniel McCallum <npmccallum@redhat.com> - 7-4
 - Retry unlocking under systemd. This prevents a race condition.
 - Resolves: rhbz#1475406

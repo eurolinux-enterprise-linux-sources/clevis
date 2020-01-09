@@ -1,0 +1,28 @@
+From e5170e17cac33706836f8b24e0a88e49cd0a47ef Mon Sep 17 00:00:00 2001
+From: Nathaniel McCallum <npmccallum@redhat.com>
+Date: Tue, 13 Feb 2018 13:33:57 -0500
+Subject: [PATCH] Skip uninitialized devices in clevis-luks-askpass
+
+This silences some log spam when using clevis while also having some
+non-clevis LUKS volumes in the same system.
+---
+ src/systemd/clevis-luks-askpass | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/systemd/clevis-luks-askpass b/src/systemd/clevis-luks-askpass
+index 6fe5269..93c59f4 100755
+--- a/src/systemd/clevis-luks-askpass
++++ b/src/systemd/clevis-luks-askpass
+@@ -47,6 +47,9 @@ while true; do
+ 
+         [ -z "$d" -o -z "$s" ] && continue
+ 
++        # If the device is not initialized, sliently skip it.
++        luksmeta test -d "$d" || continue
++
+         while read -r slot state uuid; do
+             [ "$state" != "active" ] && continue
+             [ "$uuid" != "$UUID" ] && continue
+-- 
+2.17.1
+
